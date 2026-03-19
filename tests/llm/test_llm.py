@@ -10,6 +10,7 @@ import pytest
 from src.llm import (
     OllamaUnavailableError,
     _check_ollama_connectivity,
+    _check_ollama_tool_support,
     get_llm,
     trim_messages_for_context,
 )
@@ -38,11 +39,17 @@ class TestGetLlmOllama:
 
     def test_returns_chat_ollama(self) -> None:
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"models": [{"name": "qwen3-coder:latest"}]}
+        mock_resp.json.return_value = {"models": [{"name": "gpt-oss:20b"}]}
         mock_resp.raise_for_status = MagicMock()
 
-        with patch.dict(os.environ, {"LLM_PROVIDER": "ollama"}), \
-             patch("src.llm.httpx.get", return_value=mock_resp):
+        mock_tool_resp = MagicMock()
+        mock_tool_resp.status_code = 200
+
+        with (
+            patch.dict(os.environ, {"LLM_PROVIDER": "ollama"}),
+            patch("src.llm.httpx.get", return_value=mock_resp),
+            patch("src.llm.httpx.post", return_value=mock_tool_resp),
+        ):
             llm = get_llm()
         assert type(llm).__name__ == "ChatOllama"
 
@@ -75,20 +82,62 @@ class TestCheckOllamaConnectivity:
 
     def test_success(self) -> None:
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"models": [{"name": "qwen3-coder:latest"}]}
+        mock_resp.json.return_value = {"models": [{"name": "gpt-oss:20b"}]}
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("src.llm.httpx.get", return_value=mock_resp):
-            _check_ollama_connectivity("http://localhost:11434", "qwen3-coder:latest")
+        mock_tool_resp = MagicMock()
+        mock_tool_resp.status_code = 200
+
+        with (
+            patch("src.llm.httpx.get", return_value=mock_resp),
+            patch("src.llm.httpx.post", return_value=mock_tool_resp),
+        ):
+            _check_ollama_connectivity("http://localhost:11434", "gpt-oss:20b")
 
     def test_partial_name_match(self) -> None:
         """Model name without tag should match model with tag."""
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"models": [{"name": "qwen3-coder:latest"}]}
+        mock_resp.json.return_value = {"models": [{"name": "gpt-oss:20b"}]}
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("src.llm.httpx.get", return_value=mock_resp):
-            _check_ollama_connectivity("http://localhost:11434", "qwen3-coder")
+        mock_tool_resp = MagicMock()
+        mock_tool_resp.status_code = 200
+
+        with (
+            patch("src.llm.httpx.get", return_value=mock_resp),
+            patch("src.llm.httpx.post", return_value=mock_tool_resp),
+        ):
+            _check_ollama_connectivity("http://localhost:11434", "gpt-oss")
+
+
+class TestCheckOllamaToolSupport:
+    """Tests for the tool support validation."""
+
+    def test_raises_when_model_lacks_tool_support(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.text = "registry.ollama.ai/library/qwen3-coder:latest does not support tools"
+
+        with (
+            patch("src.llm.httpx.post", return_value=mock_resp),
+            pytest.raises(OllamaUnavailableError, match="does not support tool calling"),
+        ):
+            _check_ollama_tool_support("http://localhost:11434", "qwen3-coder:latest")
+
+    def test_passes_when_model_supports_tools(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+
+        with patch("src.llm.httpx.post", return_value=mock_resp):
+            _check_ollama_tool_support("http://localhost:11434", "gpt-oss:20b")
+
+    def test_silent_on_other_http_errors(self) -> None:
+        """Non-tool-related errors should not crash startup."""
+        import httpx as _httpx
+
+        with patch("src.llm.httpx.post", side_effect=_httpx.ConnectError("timeout")):
+            # Should not raise — just logs a debug message
+            _check_ollama_tool_support("http://localhost:11434", "some-model")
 
 
 class TestTrimMessagesForContext:

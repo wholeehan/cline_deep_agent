@@ -144,10 +144,16 @@ class TestProviderParity:
 
     def test_ollama_agent_creates(self) -> None:
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"models": [{"name": "qwen3-coder:latest"}]}
+        mock_resp.json.return_value = {"models": [{"name": "gpt-oss:20b"}]}
         mock_resp.raise_for_status = MagicMock()
 
-        with patch.dict(os.environ, {"LLM_PROVIDER": "ollama"}), \
-             patch("src.llm.httpx.get", return_value=mock_resp):
+        mock_tool_resp = MagicMock()
+        mock_tool_resp.status_code = 200
+
+        with (
+            patch.dict(os.environ, {"LLM_PROVIDER": "ollama"}),
+            patch("src.llm.httpx.get", return_value=mock_resp),
+            patch("src.llm.httpx.post", return_value=mock_tool_resp),
+        ):
             agent = create_agent_manager()
             assert agent is not None

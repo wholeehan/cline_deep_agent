@@ -19,7 +19,7 @@ class OllamaUnavailableError(RuntimeError):
 
 
 def _check_ollama_connectivity(base_url: str, model: str) -> None:
-    """Ping Ollama and verify the requested model is available."""
+    """Ping Ollama, verify the model exists, and confirm it supports tool calling."""
     try:
         resp = httpx.get(f"{base_url}/api/tags", timeout=5.0)
         resp.raise_for_status()
@@ -39,6 +39,53 @@ def _check_ollama_connectivity(base_url: str, model: str) -> None:
             f"Pull it with: `ollama pull {model}`"
         )
 
+    # Verify tool calling support with a lightweight probe
+    _check_ollama_tool_support(base_url, model)
+
+
+def _check_ollama_tool_support(base_url: str, model: str) -> None:
+    """Send a minimal tool-call request to verify the model supports tools."""
+    test_payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "_probe",
+                    "description": "probe",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+        "stream": False,
+    }
+    try:
+        resp = httpx.post(
+            f"{base_url}/api/chat", json=test_payload, timeout=30.0
+        )
+        if resp.status_code == 400 and "does not support tools" in resp.text:
+            # Known models that support tool calling with Ollama
+            tool_models = [
+                "qwen2.5", "qwen3", "llama3.1", "llama3.3",
+                "mistral", "mixtral", "command-r", "gpt-oss",
+            ]
+            raise OllamaUnavailableError(
+                f"Model '{model}' does not support tool calling, "
+                f"which is required by the agent framework.\n"
+                f"Switch to a tool-capable model by setting OLLAMA_MODEL "
+                f"in your .env file.\n"
+                f"Models known to support tools: {', '.join(tool_models)}\n"
+                f"Example: OLLAMA_MODEL=gpt-oss:20b"
+            )
+    except httpx.HTTPError:
+        # Non-critical — if the probe fails for other reasons, let the
+        # actual agent invocation surface the error naturally.
+        logger.debug("Tool support probe failed for %s, skipping check", model)
+
 
 def get_llm(temperature: float = 0.0, **kwargs: Any) -> BaseChatModel:
     """Return the configured LLM backend.
@@ -49,7 +96,7 @@ def get_llm(temperature: float = 0.0, **kwargs: Any) -> BaseChatModel:
     provider = os.getenv("LLM_PROVIDER", "anthropic")
 
     if provider == "ollama":
-        model = os.getenv("OLLAMA_MODEL", "qwen3-coder:latest")
+        model = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         _check_ollama_connectivity(base_url, model)
         return ChatOllama(
