@@ -10,6 +10,7 @@ import httpx
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -63,16 +64,16 @@ def _check_ollama_tool_support(base_url: str, model: str) -> None:
         ],
         "stream": False,
     }
+    # Known models that support tool calling with Ollama
+    tool_models = [
+        "qwen2.5", "qwen3", "qwen3-coder", "llama3.1", "llama3.3",
+        "mistral", "mixtral", "command-r", "gpt-oss",
+    ]
     try:
         resp = httpx.post(
             f"{base_url}/api/chat", json=test_payload, timeout=30.0
         )
         if resp.status_code == 400 and "does not support tools" in resp.text:
-            # Known models that support tool calling with Ollama
-            tool_models = [
-                "qwen2.5", "qwen3", "llama3.1", "llama3.3",
-                "mistral", "mixtral", "command-r", "gpt-oss",
-            ]
             raise OllamaUnavailableError(
                 f"Model '{model}' does not support tool calling, "
                 f"which is required by the agent framework.\n"
@@ -81,6 +82,18 @@ def _check_ollama_tool_support(base_url: str, model: str) -> None:
                 f"Models known to support tools: {', '.join(tool_models)}\n"
                 f"Example: OLLAMA_MODEL=gpt-oss:20b"
             )
+        if resp.status_code == 500:
+            error_text = resp.text or "unknown error"
+            raise OllamaUnavailableError(
+                f"Model '{model}' failed to load on Ollama server "
+                f"(HTTP 500): {error_text}\n"
+                f"This is often caused by insufficient RAM/VRAM for the model.\n"
+                f"Try a smaller model or free up resources.\n"
+                f"Suggested models: {', '.join(tool_models)}\n"
+                f"Check Ollama server logs for details: journalctl -u ollama"
+            )
+    except OllamaUnavailableError:
+        raise
     except httpx.HTTPError:
         # Non-critical — if the probe fails for other reasons, let the
         # actual agent invocation surface the error naturally.
@@ -94,6 +107,17 @@ def get_llm(temperature: float = 0.0, **kwargs: Any) -> BaseChatModel:
     When ``ollama``, pings the server and verifies the model exists.
     """
     provider = os.getenv("LLM_PROVIDER", "anthropic")
+
+    if provider == "vllm":
+        model = os.getenv("VLLM_MODEL", "Qwen/Qwen3-Coder-Next")
+        base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        return ChatOpenAI(
+            model=model,
+            base_url=base_url,
+            api_key="not-needed",
+            temperature=temperature,
+            **kwargs,
+        )
 
     if provider == "ollama":
         model = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
@@ -127,7 +151,7 @@ def trim_messages_for_context(
     This is a rough heuristic: ~4 chars per token. Real token counting should
     use the model's tokenizer, but this provides a safe guardrail.
     """
-    if (provider or os.getenv("LLM_PROVIDER", "anthropic")) != "ollama":
+    if (provider or os.getenv("LLM_PROVIDER", "anthropic")) not in ("ollama", "vllm"):
         return messages
 
     estimated_tokens = sum(len(str(m)) for m in messages) // 4

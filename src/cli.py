@@ -6,86 +6,184 @@ import json
 import logging
 import os
 import uuid
+from contextlib import ExitStack
 
 from dotenv import load_dotenv
+from rich.console import Console
+
+from openai import APIConnectionError as OpenAIConnectionError
 
 from src.agent import create_agent_manager
 from src.hitl import build_approve_command, build_reject_command, extract_interrupts
+from src.llm import OllamaUnavailableError
+from src.logging_config import configure_logging
 from src.subagent import get_cline_executor_subagent
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-)
+console = Console()
 logger = logging.getLogger(__name__)
+
+_BANNER = r"""
+   _____ _ _
+  / ____| (_)
+ | |    | |_ _ __   ___
+ | |    | | | '_ \ / _ \
+ | |____| | | | | |  __/
+  \_____|_|_|_| |_|\___|
+"""
+
+
+# ---------------------------------------------------------------------------
+# Data directory setup
+# ---------------------------------------------------------------------------
+
+_DATA_DIRS = [
+    "data/output",
+    "data/logs",
+    "data/traces",
+]
+
+
+def _ensure_data_dirs() -> None:
+    """Create data directories for persistence on startup."""
+    for d in _DATA_DIRS:
+        os.makedirs(d, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Telemetry callback
+# ---------------------------------------------------------------------------
+
+
+def _open_telemetry_handler(stack: ExitStack) -> list:  # type: ignore[type-arg]
+    """Build LangChain callbacks for LLM telemetry logging.
+
+    Uses ExitStack so the FileCallbackHandler is properly closed on exit.
+    """
+    callbacks: list = []  # type: ignore[type-arg]
+
+    telemetry_path = os.getenv("TELEMETRY_FILE", "./data/logs/telemetry.log")
+    telemetry_dir = os.path.dirname(telemetry_path)
+    if telemetry_dir:
+        os.makedirs(telemetry_dir, exist_ok=True)
+
+    try:
+        from langchain_core.callbacks.file import FileCallbackHandler
+
+        handler = stack.enter_context(FileCallbackHandler(telemetry_path))
+        callbacks.append(handler)
+        logger.info("Telemetry logging to %s", telemetry_path)
+    except ImportError:
+        logger.warning("FileCallbackHandler not available; telemetry logging disabled")
+
+    return callbacks
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
     """Run the Cline Agent Manager interactively."""
-    print("Cline Agent Manager")
-    print(f"LLM Provider: {os.getenv('LLM_PROVIDER', 'anthropic')}")
-    print("=" * 50)
+    _ensure_data_dirs()
 
-    subagent = get_cline_executor_subagent()
-    agent = create_agent_manager(
-        subagents=[subagent],
-        skills=["/skills/"],
+    # Configure structured logging (stdout + optional file via LOG_FILE env var)
+    configure_logging(
+        level=os.getenv("LOG_LEVEL", "INFO"),
+        json_output=True,
     )
 
-    thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
+    console.print(f"[bold cyan]{_BANNER}[/]")
+    console.print(f"[dim]LLM Provider: {os.getenv('LLM_PROVIDER', 'anthropic')}[/]")
+    console.print("[dim]" + "=" * 50 + "[/]")
 
-    print(f"\nSession: {thread_id}")
-    print("Type your task (or 'quit' to exit):\n")
+    try:
+        subagent = get_cline_executor_subagent()
+        agent = create_agent_manager(
+            subagents=[subagent],
+            skills=["/skills/"],
+        )
+    except OllamaUnavailableError as exc:
+        logger.error("Ollama startup check failed: %s", exc)
+        console.print(f"[bold red]{exc}[/]\n")
+        return
 
-    while True:
-        try:
-            user_input = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
+    with ExitStack() as stack:
+        callbacks = _open_telemetry_handler(stack)
 
-        if user_input.lower() in ("quit", "exit", "q"):
-            print("Goodbye!")
-            break
+        thread_id = str(uuid.uuid4())
+        config = {"configurable": {"thread_id": thread_id}, "callbacks": callbacks}
 
-        if not user_input:
-            continue
+        console.print(f"\n[green]Session: {thread_id}[/]")
+        console.print("Type your task (or 'quit' to exit):\n")
 
-        try:
-            result = agent.invoke(
-                {"messages": [{"role": "user", "content": user_input}]},
-                config=config,
-            )
+        while True:
+            try:
+                user_input = console.input("[bold]> [/]").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[dim]Goodbye![/]")
+                break
 
-            # Check for interrupts
-            interrupts = extract_interrupts(result)
-            while interrupts:
-                print("\n--- Approval Required ---")
-                for i, req in enumerate(interrupts):
-                    print(f"  [{i}] {req.tool_name}: {req.description or json.dumps(req.action)}")
+            if user_input.lower() in ("quit", "exit", "q"):
+                console.print("[dim]Goodbye![/]")
+                break
 
-                decision = input("  [a]pprove / [r]eject? ").strip().lower()
-                if decision.startswith("a"):
-                    cmd = build_approve_command()
-                else:
-                    cmd = build_reject_command()
+            if not user_input:
+                continue
 
-                result = agent.invoke(cmd, config=config)
+            try:
+                result = agent.invoke(
+                    {"messages": [{"role": "user", "content": user_input}]},
+                    config=config,
+                )
+
+                # Check for interrupts
                 interrupts = extract_interrupts(result)
+                while interrupts:
+                    console.print("\n[bold yellow]--- Approval Required ---[/]")
+                    for i, req in enumerate(interrupts):
+                        desc = req.description or json.dumps(req.action)
+                        console.print(
+                            f"  \\[{i}] [yellow]{req.tool_name}[/]: {desc}"
+                        )
 
-            # Print final response
-            messages = result.get("messages", [])
-            if messages:
-                last = messages[-1]
-                content = getattr(last, "content", str(last))
-                print(f"\n{content}\n")
+                    decision = console.input("  [yellow]\\[a]pprove / \\[r]eject?[/] ").strip().lower()
+                    if decision.startswith("a"):
+                        cmd = build_approve_command()
+                    else:
+                        cmd = build_reject_command()
 
-        except Exception:
-            logger.exception("Error during agent invocation")
-            print("An error occurred. See logs for details.\n")
+                    result = agent.invoke(cmd, config=config)
+                    interrupts = extract_interrupts(result)
+
+                # Print final response
+                messages = result.get("messages", [])
+                if messages:
+                    last = messages[-1]
+                    content = getattr(last, "content", str(last))
+                    console.print(f"\n{content}\n")
+
+            except OpenAIConnectionError:
+                if os.getenv("LLM_PROVIDER") != "vllm":
+                    raise
+                base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+                model = os.getenv("VLLM_MODEL", "Qwen/Qwen3-Coder-Next")
+                logger.exception("Cannot reach vLLM server")
+                console.print(
+                    f"[bold red]Cannot reach vLLM server at {base_url}.[/]\n"
+                    f"Ensure vLLM is running with the expected model:\n\n"
+                    f"  [cyan]vllm serve {model} "
+                    f"--tensor-parallel-size 1 "
+                    f"--gpu-memory-utilization 0.85 "
+                    f"--max-model-len 16384 "
+                    f"--enable-auto-tool-choice "
+                    f"--tool-call-parser qwen3_coder[/]\n"
+                )
+            except Exception:
+                logger.exception("Error during agent invocation")
+                console.print("[bold red]An error occurred. See logs for details.[/]\n")
 
 
 if __name__ == "__main__":

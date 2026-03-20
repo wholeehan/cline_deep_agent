@@ -77,6 +77,25 @@ class TestGetLlmOllama:
             get_llm()
 
 
+class TestGetLlmVllm:
+    """Tests for vLLM provider path."""
+
+    def test_returns_chat_openai(self) -> None:
+        with patch.dict(os.environ, {"LLM_PROVIDER": "vllm"}):
+            llm = get_llm()
+        assert type(llm).__name__ == "ChatOpenAI"
+
+    def test_custom_model_and_base_url(self) -> None:
+        env = {
+            "LLM_PROVIDER": "vllm",
+            "VLLM_MODEL": "Qwen/Qwen3-Coder-32B-GPTQ-Int4",
+            "VLLM_BASE_URL": "http://gpu-server:8000/v1",
+        }
+        with patch.dict(os.environ, env):
+            llm = get_llm()
+        assert llm.model_name == "Qwen/Qwen3-Coder-32B-GPTQ-Int4"
+
+
 class TestCheckOllamaConnectivity:
     """Unit tests for the connectivity check."""
 
@@ -131,6 +150,18 @@ class TestCheckOllamaToolSupport:
         with patch("src.llm.httpx.post", return_value=mock_resp):
             _check_ollama_tool_support("http://localhost:11434", "gpt-oss:20b")
 
+    def test_raises_when_model_fails_to_load(self) -> None:
+        """HTTP 500 from Ollama (model failed to load) should raise."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.text = "model failed to load, resource limitations"
+
+        with (
+            patch("src.llm.httpx.post", return_value=mock_resp),
+            pytest.raises(OllamaUnavailableError, match="failed to load"),
+        ):
+            _check_ollama_tool_support("http://localhost:11434", "gpt-oss:20b")
+
     def test_silent_on_other_http_errors(self) -> None:
         """Non-tool-related errors should not crash startup."""
         import httpx as _httpx
@@ -158,6 +189,11 @@ class TestTrimMessagesForContext:
         msgs = [MagicMock(type="user", __str__=lambda s: "hello")]
         result = trim_messages_for_context(msgs, provider="ollama")
         assert len(result) == 1
+
+    def test_trimming_for_vllm_when_over_cap(self) -> None:
+        msgs = [MagicMock(type="user", __str__=lambda s: "x" * 40_000) for _ in range(5)]
+        result = trim_messages_for_context(msgs, provider="vllm")
+        assert len(result) < 5
 
     def test_system_messages_preserved(self) -> None:
         sys_msg = MagicMock(type="system", __str__=lambda s: "system prompt")

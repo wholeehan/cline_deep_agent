@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import traceback
 from typing import Any
 
 
@@ -29,12 +30,19 @@ class StructuredFormatter(logging.Formatter):
 
         if record.exc_info and record.exc_info[1]:
             log_entry["exception"] = str(record.exc_info[1])
+            log_entry["traceback"] = "".join(
+                traceback.format_exception(*record.exc_info)
+            )
 
         return json.dumps(log_entry)
 
 
 def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
-    """Configure structured logging for the application."""
+    """Configure structured logging for the application.
+
+    When LOG_FILE env var is set, structured JSON logs are also written to that file
+    (one JSON object per line, JSONL format).
+    """
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
@@ -48,6 +56,16 @@ def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
 
     root.handlers.clear()
     root.addHandler(handler)
+
+    # Optional file handler for persistent structured logs
+    log_file = os.getenv("LOG_FILE")
+    if log_file:
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(StructuredFormatter())
+        root.addHandler(file_handler)
 
 
 def log_event(
