@@ -133,6 +133,17 @@ cline_deep_agent/
 │   ├── qa_verification/     # Verify outputs against acceptance criteria
 │   ├── decision_policy/     # Auto-approve vs. escalate action rules
 │   └── cline_qa/            # Answer Cline questions from context
+├── benchmark/
+│   ├── __main__.py          # CLI: python -m benchmark run|score|list|leaderboard
+│   ├── config.py            # Pydantic models for tasks and results
+│   ├── runner.py            # Task orchestration (tmp dir isolation, pytest)
+│   ├── scorer.py            # pass@k, cost, timing metrics
+│   ├── leaderboard.py       # Markdown comparison tables
+│   ├── adapters/
+│   │   ├── base.py          # AgentAdapter ABC
+│   │   └── cline_deep.py    # Adapter for this project's agent
+│   ├── tasks/               # 5 benchmark tasks (bugfix, feature, refactor, multifile)
+│   └── results/             # Run output (gitignored)
 ├── tests/
 │   ├── llm/                 # LLM provider tests (11 tests)
 │   ├── bridge/              # PTY bridge tests (36 tests)
@@ -140,7 +151,8 @@ cline_deep_agent/
 │   ├── skills/              # SKILL.md validation (22 tests)
 │   ├── hitl/                # HITL flow tests (13 tests)
 │   ├── memory/              # State model tests (19 tests)
-│   └── e2e/                 # End-to-end integration (9 tests)
+│   ├── e2e/                 # End-to-end integration (9 tests)
+│   └── benchmark/           # Benchmark suite tests (40 tests)
 ├── pyproject.toml
 ├── docker-compose.yml
 ├── Dockerfile
@@ -203,7 +215,7 @@ ruff format src/ tests/
 
 ### Test Suite
 
-141 tests across 7 test modules:
+196 tests across 8 test modules:
 
 - **tests/llm/** — Provider factory, Ollama connectivity, context trimming
 - **tests/bridge/** — Stream classifier (20+ Cline output samples), session log, PTY spawn/inject
@@ -212,6 +224,60 @@ ruff format src/ tests/
 - **tests/hitl/** — Interrupt extraction, approve/reject/edit/batch commands
 - **tests/memory/** — SubTask validation, state transitions, TaskPlan dependency ordering
 - **tests/e2e/** — Full lifecycle, crash recovery, provider parity
+- **tests/benchmark/** — Config models, scorer, runner discovery, leaderboard generation
+
+## Benchmark Suite
+
+A built-in benchmark harness measures the agent's coding capabilities using isolated task environments, automated test validation, and structured metrics.
+
+### Available Tasks
+
+| ID | Category | Title | Difficulty |
+|----|----------|-------|------------|
+| bugfix-001-off-by-one | bugfix | Fix off-by-one error in pagination | easy |
+| bugfix-002-null-check | bugfix | Fix missing null check causing crash | easy |
+| feature-001-add-endpoint | feature | Add REST endpoint with validation | easy |
+| refactor-001-extract-class | refactor | Extract class from god-object module | easy |
+| multifile-001-api-migration | multifile | Migrate API v1→v2 across 3 files | easy |
+
+### Usage
+
+```bash
+# List available tasks
+python -m benchmark list
+
+# Run a single task with Ollama
+python -m benchmark run --provider ollama --model gpt-oss:20b --tasks bugfix-001
+
+# Run all tasks with 3 repetitions (for pass@3 metrics)
+python -m benchmark run --tasks all --repetitions 3
+
+# Run with Anthropic
+python -m benchmark run --provider anthropic --model claude-3-5-sonnet-20241022 --tasks all
+
+# Recompute metrics from existing results
+python -m benchmark score results/run-*.json
+
+# Generate comparison leaderboard
+python -m benchmark leaderboard benchmark/results/
+```
+
+### Metrics
+
+- **pass_rate** — fraction of tasks passing all tests
+- **pass@k** — unbiased probability of at least one success in k attempts
+- **avg_tokens** — mean token consumption per task
+- **avg_cost** — estimated USD cost per task
+- **by_category** — pass rate breakdown by task category
+
+### Adding Tasks
+
+Copy `benchmark/tasks/_template/` and fill in:
+- `task.toml` — task metadata (id, category, difficulty, budget, timeout)
+- `instruction.md` — natural language task description for the agent
+- `setup.sh` — install task-specific dependencies
+- `workspace/` — initial codebase (broken/incomplete code)
+- `tests/test_solution.py` — pytest suite that validates the fix
 
 ## How It Works
 
