@@ -51,7 +51,7 @@ class TestGetLlmOllama:
             patch("src.llm.httpx.post", return_value=mock_tool_resp),
         ):
             llm = get_llm()
-        assert type(llm).__name__ == "ChatOllama"
+        assert type(llm).__name__ == "RobustChatOllama"
 
     def test_ollama_unavailable_raises(self) -> None:
         import httpx as _httpx
