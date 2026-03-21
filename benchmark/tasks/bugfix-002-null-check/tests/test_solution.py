@@ -3,9 +3,15 @@
 All tests should pass once the null-check bugs have been fixed.
 """
 
+import os
+import sys
+
 import pytest
 
-from workspace.user_profile import Address, ContactInfo, UserProfile
+# Ensure the workspace root is importable (tests run from workspace/)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+
+from user_profile import Address, ContactInfo, UserProfile  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

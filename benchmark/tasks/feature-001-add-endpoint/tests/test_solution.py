@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-# Make the workspace app importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "workspace"))
+# Make the workspace root importable (tests run from workspace/)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 
 from app import app, ITEMS  # noqa: E402
 

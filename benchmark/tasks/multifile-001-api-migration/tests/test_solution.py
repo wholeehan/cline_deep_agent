@@ -4,9 +4,9 @@ import sys
 import os
 import inspect
 
-# Make the workspace importable
-WORKSPACE = os.path.join(os.path.dirname(__file__), os.pardir, "workspace")
-sys.path.insert(0, os.path.abspath(WORKSPACE))
+# Make the workspace root importable (tests run from workspace/)
+WORKSPACE = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+sys.path.insert(0, WORKSPACE)
 
 import api_client  # noqa: E402
 from user_service import UserService  # noqa: E402

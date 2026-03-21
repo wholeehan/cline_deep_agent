@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-# Ensure the workspace module is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "workspace"))
+# Ensure the workspace root is importable (tests run from workspace/)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from paginator import Paginator, paginate, total_pages
 
