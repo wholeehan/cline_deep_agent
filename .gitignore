@@ -9,6 +9,9 @@ local_file_system/
 venv/
 env/
 
+# Local persistence data
+data/
+
 # Environment variables
 .env
 .env.local
@@ -44,3 +47,6 @@ wheels/
 
 # Ollama
 *.log
+
+# Benchmark results
+benchmark/results/

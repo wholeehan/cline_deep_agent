@@ -1,0 +1,10 @@
+[task]
+id = "feature-001-add-endpoint"
+title = "Add REST endpoint with validation"
+category = "feature"
+difficulty = "easy"
+language = "python"
+expected_files_changed = 1
+token_budget = 20000
+timeout_seconds = 300
+tags = ["rest-api", "validation", "flask"]

@@ -1,0 +1,10 @@
+[task]
+id = "category-NNN-short-name"
+title = "Short human-readable title"
+category = "bugfix"           # bugfix | feature | refactor | multifile
+difficulty = "easy"           # easy | medium | hard
+language = "python"
+expected_files_changed = 1
+token_budget = 20000
+timeout_seconds = 300
+tags = ["example"]

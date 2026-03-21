@@ -1,0 +1,10 @@
+[task]
+id = "bugfix-001-off-by-one"
+title = "Fix off-by-one error in pagination"
+category = "bugfix"
+difficulty = "easy"
+language = "python"
+expected_files_changed = 1
+token_budget = 20000
+timeout_seconds = 300
+tags = ["pagination", "logic-error"]

@@ -1,0 +1,10 @@
+[task]
+id = "multifile-001-api-migration"
+title = "Migrate API v1 to v2 across 3 files"
+category = "multifile"
+difficulty = "easy"
+language = "python"
+expected_files_changed = 3
+token_budget = 20000
+timeout_seconds = 300
+tags = ["api-migration", "multi-file", "refactoring"]
