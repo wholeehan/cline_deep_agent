@@ -112,7 +112,7 @@ git clone https://github.com/<your-user>/cline_deep_agent.git
 cd cline_deep_agent
 cp .env.example .env
 
-# Starts agent-manager, ollama (with qwen3-coder), postgres, and redis
+# Starts agent-manager, ollama, postgres, grafana, and redis
 docker compose up
 ```
 
@@ -156,6 +156,9 @@ cline_deep_agent/
 │   ├── memory/              # State model tests (19 tests)
 │   ├── e2e/                 # End-to-end integration (9 tests)
 │   └── benchmark/           # Benchmark suite tests (40 tests)
+├── grafana/
+│   ├── provisioning/           # Auto-configures data source + dashboard loader
+│   └── dashboards/             # Pre-built 8-panel telemetry dashboard JSON
 ├── scripts/
 │   └── migrate_to_postgres.py  # One-time migration of flat files → PostgreSQL
 ├── telemetry.md             # Detailed telemetry database documentation
@@ -257,9 +260,16 @@ DATABASE_URL=postgresql://cline:cline@localhost:5432/cline_telemetry \
 
 This imports existing `benchmark/results/*.json` and `data/logs/agent.jsonl` into PostgreSQL. The script is idempotent — safe to run multiple times.
 
-### Dashboard Integration
+### Grafana Dashboard
 
-PostgreSQL is natively supported by Grafana, Metabase, and Superset — connect directly to `cline_telemetry` with no plugins required.
+A pre-built 8-panel Grafana dashboard is included and auto-provisioned via Docker Compose:
+
+```bash
+docker compose up -d postgres grafana
+# Open http://localhost:3000 — login: admin / admin
+```
+
+Panels include: LLM call volume, cost accumulation, token usage by model, latency percentiles (p50/p95/p99), error rate, benchmark pass rate, most-used tools, and recent errors.
 
 For full schema details, query examples, Python API reference, and troubleshooting, see [telemetry.md](telemetry.md).
 

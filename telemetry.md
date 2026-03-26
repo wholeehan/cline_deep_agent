@@ -577,16 +577,41 @@ Migration complete.
 
 PostgreSQL is natively supported by all major dashboard tools. No plugins or custom connectors are needed.
 
-### Grafana
+### Grafana (Pre-Configured)
 
-1. Add a PostgreSQL data source pointing to `localhost:5432`, database `cline_telemetry`, user `cline`
-2. Create panels using the queries from [Common Queries](#common-queries)
-3. Recommended panels:
-   - **Pass rate over time** -- Time series from `benchmark_results` joined with `benchmark_runs`
-   - **Token usage heatmap** -- From `llm_traces` grouped by model and hour
-   - **Error rate gauge** -- From `agent_events` filtered by `level = 'ERROR'`
-   - **Cost accumulator** -- Running sum of `cost_usd` from `llm_traces`
-   - **Latency percentiles** -- Using `PERCENTILE_CONT` on `llm_traces.latency_ms`
+A Grafana dashboard is **auto-provisioned** and ready to use out of the box.
+
+**Quick start:**
+```bash
+docker compose up -d postgres grafana
+# Open http://localhost:3000 — login: admin / admin
+```
+
+The "Cline Telemetry" dashboard loads automatically as the home page with 8 panels:
+
+| Panel | Type | Data Source |
+|-------|------|-------------|
+| LLM Call Volume Over Time | Time series | `llm_traces` |
+| Cost Accumulation Over Time | Time series (cumulative) | `llm_traces` |
+| Token Usage by Model | Stacked bar chart | `llm_traces` |
+| Latency Percentiles (p50/p95/p99) | Table with color thresholds | `llm_traces` |
+| Error Rate | Stat gauge (green/yellow/red) | `llm_traces` |
+| Most-Used Tools | Horizontal bar chart | `agent_events` |
+| Benchmark Pass Rate by Model | Bar chart | `benchmark_results` |
+| Recent Errors | Full-width table | `agent_events` |
+
+**How it works:**
+- The PostgreSQL data source is auto-configured via `grafana/provisioning/datasources/datasource.yml`
+- The dashboard JSON is loaded from `grafana/dashboards/cline-telemetry.json`
+- No manual setup required -- everything is provisioned on container start
+
+**Customizing the dashboard:**
+1. Edit panels in the Grafana UI at `http://localhost:3000`
+2. When satisfied, click the share/export button and save the JSON
+3. Replace `grafana/dashboards/cline-telemetry.json` with the exported JSON
+4. Changes persist across container restarts via the file provisioner
+
+**Credentials:** Default login is `admin` / `admin`. Change via `GF_SECURITY_ADMIN_PASSWORD` in `docker-compose.yml`.
 
 ### Metabase
 

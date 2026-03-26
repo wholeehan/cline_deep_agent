@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: ClineTelemetry
+    uid: cline-telemetry-ds
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    database: cline_telemetry
+    user: cline
+    secureJsonData:
+      password: cline
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+      postgresVersion: 1600
+      timescaledb: false
+    isDefault: true
+    editable: false

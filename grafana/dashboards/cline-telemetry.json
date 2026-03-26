@@ -1,0 +1,356 @@
+{
+  "uid": "cline-telemetry",
+  "title": "Cline Telemetry",
+  "description": "Agent events, LLM traces, and benchmark results from the Cline Deep Agent telemetry database.",
+  "tags": ["cline", "telemetry", "llm"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "LLM Call Volume Over Time",
+      "description": "Number of LLM API calls per time interval, grouped by model.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "pointSize": 5,
+            "showPoints": "auto"
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+          "rawSql": "SELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  model,\n  COUNT(*) AS calls\nFROM llm_traces\nWHERE $__timeFilter(timestamp)\nGROUP BY time, model\nORDER BY time",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Cost Accumulation Over Time",
+      "description": "Cumulative LLM cost in USD over the selected time range.",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "gradientMode": "scheme"
+          },
+          "color": { "mode": "fixed", "fixedColor": "green" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+          "rawSql": "SELECT\n  time,\n  SUM(period_cost) OVER (ORDER BY time) AS cumulative_cost_usd\nFROM (\n  SELECT\n    $__timeGroup(timestamp, $__interval) AS time,\n    SUM(cost_usd) AS period_cost\n  FROM llm_traces\n  WHERE $__timeFilter(timestamp)\n  GROUP BY 1\n) sub\nORDER BY time",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Token Usage by Model",
+      "description": "Total prompt and completion tokens consumed, grouped by model.",
+      "type": "barchart",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "prompt_tokens" },
+            "properties": [{ "id": "displayName", "value": "Prompt Tokens" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "completion_tokens" },
+            "properties": [{ "id": "displayName", "value": "Completion Tokens" }]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "vertical",
+        "stacking": "normal",
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "xTickLabelRotation": -45
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+          "rawSql": "SELECT\n  model,\n  SUM(prompt_tokens) AS prompt_tokens,\n  SUM(completion_tokens) AS completion_tokens\nFROM llm_traces\nWHERE $__timeFilter(timestamp)\nGROUP BY model\nORDER BY prompt_tokens + completion_tokens DESC",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Latency Percentiles by Model",
+      "description": "p50, p95, and p99 latency in milliseconds for successful LLM calls.",
+      "type": "table",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "model" },
+            "properties": [{ "id": "unit", "value": "string" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "calls" },
+            "properties": [{ "id": "unit", "value": "short" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "p95_ms" },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 2000 },
+                    { "color": "red", "value": 5000 }
+                  ]
+                }
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "p99_ms" },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 3000 },
+                    { "color": "red", "value": 10000 }
+                  ]
+                }
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "calls", "desc": true }]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+          "rawSql": "SELECT\n  model,\n  COUNT(*) AS calls,\n  ROUND(CAST(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY latency_ms) AS numeric), 0) AS p50_ms,\n  ROUND(CAST(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) AS numeric), 0) AS p95_ms,\n  ROUND(CAST(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms) AS numeric), 0) AS p99_ms\nFROM llm_traces\nWHERE error IS NULL AND $__timeFilter(timestamp)\nGROUP BY model",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Error Rate",
+      "description": "Percentage of LLM calls that resulted in an error.",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 16, "w": 6, "h": 6 },
+      "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 15 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "graphMode": "none",
+        "textMode": "value",
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+          "rawSql": "SELECT\n  ROUND(\n    COUNT(*) FILTER (WHERE error IS NOT NULL) * 100.0 / NULLIF(COUNT(*), 0), 1\n  ) AS error_rate_pct\nFROM llm_traces\nWHERE $__timeFilter(timestamp)",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Most-Used Tools",
+      "description": "Top 15 tools by invocation count.",
+      "type": "barchart",
+      "gridPos": { "x": 6, "y": 16, "w": 6, "h": 6 },
+      "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": { "displayMode": "hidden" },
+        "xTickLabelRotation": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+          "rawSql": "SELECT\n  tool_name,\n  COUNT(*) AS invocations\nFROM agent_events\nWHERE event_type = 'tool_call'\n  AND tool_name IS NOT NULL\n  AND $__timeFilter(timestamp)\nGROUP BY tool_name\nORDER BY invocations DESC\nLIMIT 15",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Benchmark Pass Rate by Model",
+      "description": "Percentage of benchmark tasks passing all tests, grouped by model.",
+      "type": "barchart",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 6 },
+      "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "continuous-GrYlRd" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 80 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "vertical",
+        "legend": { "displayMode": "hidden" },
+        "xTickLabelRotation": -45
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+          "rawSql": "SELECT\n  br.model,\n  ROUND(AVG(bres.passed::int) * 100, 1) AS pass_rate_pct\nFROM benchmark_results bres\nJOIN benchmark_runs br USING (run_id)\nGROUP BY br.model\nORDER BY pass_rate_pct DESC",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Recent Errors",
+      "description": "Latest ERROR-level agent events with exception details.",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "timestamp" },
+            "properties": [{ "id": "custom.width", "value": 180 }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "level" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null }
+                  ]
+                }
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "message" },
+            "properties": [{ "id": "custom.width", "value": 400 }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "exception" },
+            "properties": [{ "id": "custom.width", "value": 300 }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "session_id" },
+            "properties": [{ "id": "custom.width", "value": 280 }]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "timestamp", "desc": true }]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
+          "rawSql": "SELECT\n  timestamp,\n  level,\n  logger,\n  message,\n  exception,\n  tool_name,\n  session_id\nFROM agent_events\nWHERE level = 'ERROR' AND $__timeFilter(timestamp)\nORDER BY timestamp DESC\nLIMIT 50",
+          "format": "table"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}
