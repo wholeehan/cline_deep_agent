@@ -56,7 +56,9 @@ def _ensure_data_dirs() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _open_telemetry_handler(stack: ExitStack) -> list:  # type: ignore[type-arg]
+def _open_telemetry_handler(
+    stack: ExitStack, session_id: str | None = None
+) -> list:  # type: ignore[type-arg]
     """Build LangChain callbacks for LLM telemetry logging.
 
     Uses ExitStack so the FileCallbackHandler is properly closed on exit.
@@ -76,6 +78,22 @@ def _open_telemetry_handler(stack: ExitStack) -> list:  # type: ignore[type-arg]
         logger.info("Telemetry logging to %s", telemetry_path)
     except ImportError:
         logger.warning("FileCallbackHandler not available; telemetry logging disabled")
+
+    # Optional PostgreSQL telemetry handler (dual-write with file)
+    if os.getenv("DATABASE_URL"):
+        try:
+            from src.db import get_connection_pool
+            from src.telemetry import PostgresCallbackHandler
+
+            pool = get_connection_pool()
+            if pool is not None:
+                pg_cb = PostgresCallbackHandler(pool, session_id=session_id)
+                callbacks.append(pg_cb)
+                logger.info("Telemetry also logging to PostgreSQL llm_traces table")
+        except Exception:
+            logger.warning(
+                "Failed to set up PostgreSQL telemetry handler", exc_info=True
+            )
 
     return callbacks
 
@@ -111,9 +129,8 @@ def main() -> None:
         return
 
     with ExitStack() as stack:
-        callbacks = _open_telemetry_handler(stack)
-
         thread_id = str(uuid.uuid4())
+        callbacks = _open_telemetry_handler(stack, session_id=thread_id)
         config = {"configurable": {"thread_id": thread_id}, "callbacks": callbacks}
 
         console.print(f"\n[green]Session: {thread_id}[/]")

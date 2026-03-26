@@ -11,6 +11,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend, StoreBackend
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.store.memory import InMemoryStore
 
 from src.llm import get_llm
 
@@ -23,6 +24,14 @@ try:
     _SQLITE_AVAILABLE = True
 except ImportError:
     _SQLITE_AVAILABLE = False
+
+# Try to import PostgresSaver for PostgreSQL-backed checkpointing
+try:
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    _POSTGRES_AVAILABLE = True
+except ImportError:
+    _POSTGRES_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -99,10 +108,30 @@ def create_composite_backend(runtime: Any) -> CompositeBackend:
 
 
 def get_checkpointer(db_path: str | None = None) -> Any:
-    """Return a persistent SqliteSaver if available, otherwise MemorySaver.
+    """Return a persistent checkpointer: PostgreSQL > SQLite > MemorySaver.
 
-    Set CHECKPOINT_DB env var to configure the SQLite database path.
+    Priority:
+    1. PostgresSaver when DATABASE_URL is set and langgraph-checkpoint-postgres installed
+    2. SqliteSaver when CHECKPOINT_DB is set and langgraph-checkpoint-sqlite installed
+    3. MemorySaver as final fallback (state will not persist across restarts)
     """
+    # Prefer PostgreSQL when DATABASE_URL is configured
+    db_url = os.getenv("DATABASE_URL")
+    if db_url and _POSTGRES_AVAILABLE:
+        import psycopg
+
+        logger.info("Using PostgresSaver checkpointer with DATABASE_URL")
+        conn = psycopg.connect(db_url)
+        checkpointer = PostgresSaver(conn)
+        checkpointer.setup()
+        return checkpointer
+    if db_url and not _POSTGRES_AVAILABLE:
+        logger.warning(
+            "DATABASE_URL set but langgraph-checkpoint-postgres not installed; "
+            "falling back to SQLite or MemorySaver"
+        )
+
+    # Fall back to SQLite
     path = db_path or os.getenv("CHECKPOINT_DB")
     if path and _SQLITE_AVAILABLE:
         db_dir = os.path.dirname(path)
@@ -157,6 +186,7 @@ def create_agent_manager(
         subagents=subagents or [],  # type: ignore[arg-type]
         skills=skills or [],
         checkpointer=checkpointer,
+        store=InMemoryStore(),
         backend=create_composite_backend,
         interrupt_on=interrupt_on or {},
         name="agent-manager",

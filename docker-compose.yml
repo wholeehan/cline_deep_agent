@@ -6,8 +6,11 @@ services:
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3-coder:latest}
+      - DATABASE_URL=postgresql://cline:cline@postgres:5432/cline_telemetry
     depends_on:
       ollama:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     volumes:
       - ./workspace:/app/workspace
@@ -27,6 +30,22 @@ services:
       timeout: 5s
       retries: 5
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cline_telemetry
+      POSTGRES_USER: cline
+      POSTGRES_PASSWORD: cline
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cline -d cline_telemetry"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   redis:
     image: redis:7-alpine
     ports:
@@ -36,4 +55,5 @@ services:
 
 volumes:
   ollama_data:
+  postgres_data:
   redis_data:

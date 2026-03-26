@@ -13,6 +13,7 @@ from pathlib import Path
 
 from benchmark.adapters.base import AgentAdapter
 from benchmark.adapters.cline_deep import ClineDeepAdapter
+from benchmark.adapters.direct_llm import DirectLLMAdapter
 from benchmark.config import BenchmarkReport, RunConfig, TaskConfig, TaskResult
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 _ADAPTERS: dict[str, type[AgentAdapter]] = {
     "cline-deep": ClineDeepAdapter,
+    "direct-llm": DirectLLMAdapter,
 }
 
 
@@ -210,9 +212,77 @@ class BenchmarkRunner:
 
 
 def save_report(report: BenchmarkReport) -> Path:
-    """Save a benchmark report as JSON to the results directory."""
+    """Save a benchmark report as JSON to the results directory.
+
+    When DATABASE_URL is set, also writes to benchmark_runs and benchmark_results
+    tables in PostgreSQL (dual-write).
+    """
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / f"{report.run_id}.json"
     out_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     logger.info("Report saved to %s", out_path)
+
+    _save_report_to_postgres(report)
+
     return out_path
+
+
+def _save_report_to_postgres(report: BenchmarkReport) -> None:
+    """Persist benchmark report to PostgreSQL if DATABASE_URL is configured."""
+    import os
+
+    if not os.getenv("DATABASE_URL"):
+        return
+
+    try:
+        from src.db import get_connection_pool
+
+        pool = get_connection_pool()
+        if pool is None:
+            return
+
+        import json
+
+        with pool.connection() as conn:
+            conn.execute(
+                """INSERT INTO benchmark_runs (run_id, timestamp, agent, provider, model, summary)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (run_id) DO NOTHING""",
+                (
+                    report.run_id,
+                    report.timestamp,
+                    report.agent,
+                    report.provider,
+                    report.model,
+                    json.dumps(report.summary),
+                ),
+            )
+
+            for task in report.tasks:
+                token_usage = task.token_usage
+                conn.execute(
+                    """INSERT INTO benchmark_results
+                       (run_id, task_id, repetition, passed, wall_clock_seconds,
+                        prompt_tokens, completion_tokens, total_tokens,
+                        cost_usd, files_changed, test_output, error)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        report.run_id,
+                        task.task_id,
+                        task.repetition,
+                        task.passed,
+                        task.wall_clock_seconds,
+                        token_usage.prompt_tokens if token_usage else None,
+                        token_usage.completion_tokens if token_usage else None,
+                        token_usage.total_tokens if token_usage else None,
+                        task.cost_usd,
+                        task.files_changed,
+                        task.test_output,
+                        task.error,
+                    ),
+                )
+
+            conn.commit()
+        logger.info("Report %s also saved to PostgreSQL", report.run_id)
+    except Exception:
+        logger.warning("Failed to save report to PostgreSQL", exc_info=True)

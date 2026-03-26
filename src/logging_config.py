@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 import traceback
 from typing import Any
 
@@ -37,6 +39,93 @@ class StructuredFormatter(logging.Formatter):
         return json.dumps(log_entry)
 
 
+class PostgresLogHandler(logging.Handler):
+    """Logging handler that writes structured events to the agent_events table.
+
+    Buffers records and flushes in batches to reduce database round-trips.
+    """
+
+    FLUSH_SIZE = 50
+    FLUSH_INTERVAL = 5.0  # seconds
+
+    def __init__(self, pool: Any, level: int = logging.NOTSET) -> None:
+        super().__init__(level)
+        self._pool = pool
+        self._buffer: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._last_flush = time.monotonic()
+        self._timer: threading.Timer | None = None
+        self._start_timer()
+
+    def _start_timer(self) -> None:
+        self._timer = threading.Timer(self.FLUSH_INTERVAL, self._timed_flush)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _timed_flush(self) -> None:
+        self.flush()
+        self._start_timer()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        row: dict[str, Any] = {
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "llm_provider": os.getenv("LLM_PROVIDER", "anthropic"),
+            "event_type": getattr(record, "event_type", None),
+            "subtask_id": getattr(record, "subtask_id", None),
+            "tool_name": getattr(record, "tool_name", None),
+            "decision": getattr(record, "decision", None),
+            "status": getattr(record, "status", None),
+            "exception": None,
+            "traceback": None,
+        }
+        if record.exc_info and record.exc_info[1]:
+            row["exception"] = str(record.exc_info[1])
+            row["traceback"] = "".join(traceback.format_exception(*record.exc_info))
+
+        with self._lock:
+            self._buffer.append(row)
+            if len(self._buffer) >= self.FLUSH_SIZE:
+                self._flush_buffer()
+
+    def flush(self) -> None:
+        with self._lock:
+            self._flush_buffer()
+
+    def _flush_buffer(self) -> None:
+        if not self._buffer:
+            return
+        batch = self._buffer[:]
+        self._buffer.clear()
+        self._last_flush = time.monotonic()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    for row in batch:
+                        cur.execute(
+                            """INSERT INTO agent_events
+                               (level, logger, message, llm_provider,
+                                event_type, subtask_id, tool_name, decision, status,
+                                exception, traceback)
+                               VALUES (%(level)s, %(logger)s, %(message)s, %(llm_provider)s,
+                                       %(event_type)s, %(subtask_id)s, %(tool_name)s,
+                                       %(decision)s, %(status)s,
+                                       %(exception)s, %(traceback)s)""",
+                            row,
+                        )
+                conn.commit()
+        except Exception:
+            # Avoid recursive logging — silently drop on DB failure
+            pass
+
+    def close(self) -> None:
+        if self._timer:
+            self._timer.cancel()
+        self.flush()
+        super().close()
+
+
 def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
     """Configure structured logging for the application.
 
@@ -66,6 +155,21 @@ def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(StructuredFormatter())
         root.addHandler(file_handler)
+
+    # Optional PostgreSQL handler for queryable telemetry (dual-write with file)
+    if os.getenv("DATABASE_URL"):
+        try:
+            from src.db import get_connection_pool
+
+            pool = get_connection_pool()
+            if pool is not None:
+                pg_handler = PostgresLogHandler(pool)
+                root.addHandler(pg_handler)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to set up PostgreSQL log handler; continuing with file logging only",
+                exc_info=True,
+            )
 
 
 def log_event(

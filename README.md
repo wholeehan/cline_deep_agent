@@ -47,13 +47,14 @@ The manager decomposes user tasks into subtasks, dispatches them to a **cline-ex
 
 ## Features
 
-- **Dual LLM providers** — Claude 3.5 Sonnet (Anthropic API) or qwen3-coder (local via Ollama), switchable with a single env var
+- **Dual LLM providers** — Claude 3.5 Sonnet (Anthropic API) or qwen3-coder (local via Ollama / vLLM), switchable with a single env var
 - **Task decomposition** — breaks vague requests into structured subtasks with acceptance criteria, complexity, and dependency ordering
 - **Cline PTY bridge** — spawns Cline in a pseudo-terminal, classifies stdout into event types (progress, question, approval, error, command), injects responses
 - **Human-in-the-loop** — auto-approves safe actions (file reads/writes, local commands) and escalates risky ones (HTTP, deletes, git push) via LangGraph interrupts
 - **QA verification** — evaluates subtask output against acceptance criteria before marking done
 - **State machine** — enforces valid subtask transitions: `pending → dispatched → verified | failed` (with retry from `failed`)
 - **Structured logging** — JSON logs with `llm_provider`, event type, tool name, and decision metadata
+- **Telemetry database** — Optional PostgreSQL backend for queryable agent events, LLM traces, and benchmark results with dual-write to flat files (see [Telemetry Database](#telemetry-database))
 - **Session replay** — timestamped append-only log of all PTY stdin/stdout for debugging
 - **Context window guard** — automatic message trimming when Ollama context exceeds 32k tokens
 
@@ -111,7 +112,7 @@ git clone https://github.com/<your-user>/cline_deep_agent.git
 cd cline_deep_agent
 cp .env.example .env
 
-# Starts agent-manager, ollama (with qwen3-coder), and redis
+# Starts agent-manager, ollama (with qwen3-coder), postgres, and redis
 docker compose up
 ```
 
@@ -120,13 +121,15 @@ docker compose up
 ```
 cline_deep_agent/
 ├── src/
-│   ├── llm.py              # LLM provider factory (Anthropic / Ollama)
+│   ├── llm.py              # LLM provider factory (Anthropic / Ollama / vLLM)
 │   ├── bridge.py            # Cline PTY bridge — spawn, parse, inject
 │   ├── agent.py             # Agent manager setup with CompositeBackend
 │   ├── subagent.py          # cline-executor subagent + tools
 │   ├── hitl.py              # Human-in-the-loop helpers (interrupt/resume)
 │   ├── models.py            # SubTask/TaskPlan Pydantic models + state machine
-│   ├── logging_config.py    # Structured JSON logging
+│   ├── logging_config.py    # Structured JSON logging + PostgreSQL log handler
+│   ├── db.py                # PostgreSQL connection pool + schema init
+│   ├── telemetry.py         # LLM trace callback handler for PostgreSQL
 │   └── cli.py               # Interactive CLI entry point
 ├── skills/
 │   ├── task_decomposition/  # Break tasks into structured subtasks
@@ -153,6 +156,9 @@ cline_deep_agent/
 │   ├── memory/              # State model tests (19 tests)
 │   ├── e2e/                 # End-to-end integration (9 tests)
 │   └── benchmark/           # Benchmark suite tests (40 tests)
+├── scripts/
+│   └── migrate_to_postgres.py  # One-time migration of flat files → PostgreSQL
+├── telemetry.md             # Detailed telemetry database documentation
 ├── pyproject.toml
 ├── docker-compose.yml
 ├── Dockerfile
@@ -167,11 +173,17 @@ All configuration is via environment variables (see `.env.example`):
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_PROVIDER` | `anthropic` | `"anthropic"` or `"ollama"` |
+| `LLM_PROVIDER` | `anthropic` | `"anthropic"`, `"ollama"`, or `"vllm"` |
 | `ANTHROPIC_API_KEY` | — | Required when using Anthropic |
 | `ANTHROPIC_MODEL` | `claude-3-5-sonnet-20241022` | Anthropic model ID |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen3-coder:latest` | Ollama model name |
+| `VLLM_BASE_URL` | `http://localhost:8000/v1` | vLLM server URL |
+| `VLLM_MODEL` | `Qwen/Qwen3-Coder-Next` | vLLM model name |
+| `DATABASE_URL` | — | PostgreSQL connection string for telemetry (see [Telemetry Database](#telemetry-database)) |
+| `CHECKPOINT_DB` | `./data/checkpoints.db` | SQLite checkpoint path (fallback when `DATABASE_URL` not set) |
+| `LOG_FILE` | `./data/logs/agent.jsonl` | Structured log file path |
+| `TELEMETRY_FILE` | `./data/logs/telemetry.log` | LangChain telemetry log path |
 | `LANGSMITH_TRACING` | `false` | Enable LangSmith trace collection |
 | `LANGSMITH_API_KEY` | — | LangSmith API key |
 | `LANGSMITH_PROJECT` | `cline-agent-manager` | LangSmith project name |
@@ -190,6 +202,66 @@ The agent auto-approves safe actions and escalates risky ones:
 | File/directory delete | Always escalate |
 | System modification | Always escalate |
 | Database destructive ops | Always escalate |
+
+## Telemetry Database
+
+The project includes an optional PostgreSQL-based telemetry system that stores agent events, LLM traces, and benchmark results in a queryable database. When enabled, all telemetry is **dual-written** to both PostgreSQL and flat files, ensuring no data loss if the database is temporarily unavailable.
+
+### Quick Setup
+
+```bash
+# Start PostgreSQL via Docker Compose
+docker compose up -d postgres
+
+# Set the connection string
+echo 'DATABASE_URL=postgresql://cline:cline@localhost:5432/cline_telemetry' >> .env
+
+# Run the agent — tables are created automatically on first startup
+cline-agent
+```
+
+### What Gets Stored
+
+| Table | Contents | Replaces |
+|-------|----------|----------|
+| `agent_events` | Structured log events (tool calls, decisions, errors) | `data/logs/agent.jsonl` |
+| `llm_traces` | Per-call LLM telemetry (tokens, latency, cost) | `data/logs/telemetry.log` |
+| `benchmark_runs` | Benchmark run metadata | `benchmark/results/*.json` |
+| `benchmark_results` | Per-task pass/fail, tokens, cost | `benchmark/results/*.json` |
+| `checkpoints` | LangGraph agent state (auto-managed) | `data/checkpoints.db` |
+
+### Example Queries
+
+```sql
+-- Pass rate by model
+SELECT model, ROUND(AVG(passed::int) * 100, 1) AS pass_rate
+FROM benchmark_results JOIN benchmark_runs USING (run_id)
+GROUP BY model;
+
+-- Token usage trends
+SELECT date_trunc('day', timestamp) AS day, model, AVG(total_tokens)::int AS avg_tokens
+FROM llm_traces GROUP BY 1, 2 ORDER BY 1 DESC;
+
+-- Most-used tools
+SELECT tool_name, COUNT(*) AS calls
+FROM agent_events WHERE event_type = 'tool_call'
+GROUP BY 1 ORDER BY 2 DESC LIMIT 10;
+```
+
+### Migrating Historical Data
+
+```bash
+DATABASE_URL=postgresql://cline:cline@localhost:5432/cline_telemetry \
+    python -m scripts.migrate_to_postgres
+```
+
+This imports existing `benchmark/results/*.json` and `data/logs/agent.jsonl` into PostgreSQL. The script is idempotent — safe to run multiple times.
+
+### Dashboard Integration
+
+PostgreSQL is natively supported by Grafana, Metabase, and Superset — connect directly to `cline_telemetry` with no plugins required.
+
+For full schema details, query examples, Python API reference, and troubleshooting, see [telemetry.md](telemetry.md).
 
 ## Development
 
