@@ -113,7 +113,7 @@
         {
           "refId": "A",
           "datasource": { "type": "postgres", "uid": "cline-telemetry-ds" },
-          "rawSql": "SELECT\n  model,\n  SUM(prompt_tokens) AS prompt_tokens,\n  SUM(completion_tokens) AS completion_tokens\nFROM llm_traces\nWHERE $__timeFilter(timestamp)\nGROUP BY model\nORDER BY prompt_tokens + completion_tokens DESC",
+          "rawSql": "SELECT\n  model,\n  SUM(prompt_tokens) AS prompt_tokens,\n  SUM(completion_tokens) AS completion_tokens\nFROM llm_traces\nWHERE $__timeFilter(timestamp)\nGROUP BY model\nORDER BY SUM(prompt_tokens) + SUM(completion_tokens) DESC",
           "format": "table"
         }
       ]

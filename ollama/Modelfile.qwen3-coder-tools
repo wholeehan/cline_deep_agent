@@ -1,0 +1,76 @@
+# Custom Modelfile: qwen3-coder with tool-calling support
+#
+# The base qwen3-coder:latest model supports tool calling at the model level
+# (it was trained on tool-call data) but its default Ollama template lacks the
+# {{ .Tools }} and {{ .ToolCalls }} markers, so Ollama rejects tool requests.
+#
+# This Modelfile wraps qwen3-coder with a proper Qwen3 ChatML tool-calling
+# template, enabling native tool support without changing the model weights.
+#
+# Build: ollama create qwen3-coder-tools -f ollama/Modelfile.qwen3-coder-tools
+# Usage: OLLAMA_SUBAGENT_MODEL=qwen3-coder-tools:latest
+
+FROM qwen3-coder:latest
+
+TEMPLATE """
+{{- if .System }}<|im_start|>system
+{{ .System }}
+{{- if .Tools }}
+
+# Tools
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{{- range .Tools }}
+{"type": "function", "function": {"name": "{{ .Function.Name }}", "description": "{{ .Function.Description }}", "parameters": {{ .Function.Parameters }}}}
+{{- end }}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call>
+{{- end }}
+<|im_end|>
+{{ else if .Tools }}<|im_start|>system
+# Tools
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{{- range .Tools }}
+{"type": "function", "function": {"name": "{{ .Function.Name }}", "description": "{{ .Function.Description }}", "parameters": {{ .Function.Parameters }}}}
+{{- end }}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call>
+<|im_end|>
+{{ end }}
+{{- range .Messages }}
+{{- if eq .Role "user" }}<|im_start|>user
+{{ .Content }}<|im_end|>
+{{ else if eq .Role "assistant" }}<|im_start|>assistant
+{{ if .Content }}{{ .Content }}{{ end }}
+{{- if .ToolCalls }}
+{{- range .ToolCalls }}
+<tool_call>
+{"name": "{{ .Function.Name }}", "arguments": {{ .Function.Arguments }}}
+</tool_call>
+{{- end }}
+{{ end }}<|im_end|>
+{{ else if eq .Role "tool" }}<|im_start|>user
+<tool_response>
+{{ .Content }}
+</tool_response>
+<|im_end|>
+{{ end }}
+{{- end }}<|im_start|>assistant
+"""
+
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"

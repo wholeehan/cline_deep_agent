@@ -199,15 +199,28 @@ class ClineBridge:
         logger.info("Spawned Cline process PID=%d", pid)
         return pid
 
-    def send_task(self, task: str) -> str:
-        """Send a task string to a running Cline session and return output summary."""
+    def send_task(self, task: str, read_timeout: float = 10.0) -> str:
+        """Send a task string to a running Cline session and return output summary.
+
+        Parameters
+        ----------
+        read_timeout:
+            Maximum seconds to wait for each line of output.  When a line
+            takes longer than this the read loop ends and collected output
+            is returned.  This prevents hanging when Cline is waiting for
+            input or producing output slowly.
+        """
         if self._process is None or not self._process.isalive():
             self.spawn()
 
         assert self._process is not None
         self.inject(task)
 
-        # Read available output
+        # Use a short per-line timeout so we don't hang forever.
+        # Save and restore the original timeout.
+        original_timeout = self._process.timeout
+        self._process.timeout = int(read_timeout)
+
         output_chunks: list[str] = []
         try:
             while True:
@@ -217,9 +230,14 @@ class ClineBridge:
                 self._session_log.record("stdout", line.strip())
                 output_chunks.append(line.strip())
         except pexpect.TIMEOUT:
-            pass
+            logger.debug(
+                "send_task: readline timed out after %ds (%d lines collected)",
+                read_timeout, len(output_chunks),
+            )
         except pexpect.EOF:
-            pass
+            logger.debug("send_task: process EOF (%d lines collected)", len(output_chunks))
+        finally:
+            self._process.timeout = original_timeout
 
         return "\n".join(output_chunks)
 

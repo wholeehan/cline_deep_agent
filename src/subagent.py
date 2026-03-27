@@ -121,27 +121,61 @@ def approve_cline_action(action: str, action_type: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def get_cline_executor_subagent() -> dict[str, Any]:
+def get_cline_executor_subagent(
+    callbacks: list[Any] | None = None,
+) -> dict[str, Any]:
     """Return the cline-executor subagent definition dict.
 
     This dict is passed to create_deep_agent(subagents=[...]).
+
+    The subagent uses its own LLM model (defaulting to qwen3-coder:latest
+    via ``OLLAMA_SUBAGENT_MODEL``), while the supervisor uses the main
+    ``OLLAMA_MODEL`` (gpt-oss:20b by default).
+
+    Parameters
+    ----------
+    callbacks:
+        Optional list of LangChain callbacks to bind directly to the
+        subagent's LLM instance. This ensures telemetry is captured for
+        subagent LLM calls even when the framework doesn't forward
+        parent config callbacks.
     """
+    import os
+
+    subagent_model = os.getenv("OLLAMA_SUBAGENT_MODEL", "qwen3-coder-tools:latest")
+    # skip_tool_check=False: verify the subagent model supports tool calling,
+    # since the deepagents framework requires it via bind_tools()
+    subagent_llm = get_llm(
+        temperature=0.0, model_override=subagent_model, skip_tool_check=False,
+        callbacks=callbacks or [],
+    )
+    logger.info(
+        "cline-executor subagent LLM created: model=%s callbacks=%s",
+        subagent_llm.model,
+        [type(cb).__name__ for cb in (subagent_llm.callbacks or [])],
+    )
+
     return {
         "name": "cline-executor",
+        "model": subagent_llm,
         "description": (
             "Executes subtasks by delegating to the Cline CLI. "
             "Handles Cline questions, approval prompts, and streams output. "
             "Use this subagent whenever a subtask needs to be executed via Cline."
         ),
         "system_prompt": (
-            "You are the Cline Executor. Your job is to:\n"
-            "1. Receive subtasks from the agent manager\n"
-            "2. Dispatch them to the Cline CLI via dispatch_subtask\n"
-            "3. Answer any questions Cline asks using answer_question\n"
-            "4. Handle approval prompts using approve_cline_action\n"
-            "5. Return a summary of what was accomplished\n\n"
-            "Always check the output for errors. If Cline crashes or fails, "
-            "report the failure clearly."
+            "You are the Cline Executor. You run tasks via the Cline CLI.\n\n"
+            "## Workflow:\n"
+            "1. Call dispatch_subtask with the task description.\n"
+            "2. If Cline asks a question, answer it using answer_question.\n"
+            "3. If Cline requests approval for a risky action, use approve_cline_action.\n\n"
+            "## Rules:\n"
+            "- Call dispatch_subtask exactly ONCE for the given task.\n"
+            "- Do NOT retry or re-dispatch if the first attempt produces output.\n"
+            "- Include the full output (code, file contents, results) in your response,\n"
+            "  not just a summary.\n"
+            "- If Cline fails or crashes, report the error clearly and stop.\n"
+            "- When done, return the result immediately. Do not call additional tools."
         ),
         "tools": [dispatch_subtask, answer_question, approve_cline_action],
         "skills": ["/skills/cline_qa/"],
@@ -150,10 +184,7 @@ def get_cline_executor_subagent() -> dict[str, Any]:
                 "allowed_decisions": ["approve", "edit", "reject"],
                 "description": "Cline wants to perform an action that requires user approval",
             },
-            "dispatch_subtask": {
-                "allowed_decisions": ["approve", "reject"],
-                "description": "A subtask is about to be dispatched to Cline",
-            },
+            "dispatch_subtask": False,
             "answer_question": False,
         },
     }

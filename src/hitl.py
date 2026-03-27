@@ -20,11 +20,40 @@ class ActionRequest:
     description: str = ""
 
 
+def _parse_hitl_request(val: dict[str, Any]) -> list[ActionRequest]:
+    """Parse a HITLRequest dict into ActionRequest objects.
+
+    HITLRequest format (from langchain.agents.middleware.human_in_the_loop):
+        action_requests: [{name: str, args: dict, description?: str}, ...]
+        review_configs: [{action_name: str, allowed_decisions: [...], ...}, ...]
+    """
+    action_reqs = val.get("action_requests", [])
+    if action_reqs:
+        return [
+            ActionRequest(
+                tool_name=ar.get("name", "unknown"),
+                action=ar.get("args", {}),
+                description=ar.get("description", ""),
+            )
+            for ar in action_reqs
+        ]
+    # Fallback: try flat format (tool_name/args at top level)
+    if "tool_name" in val or "name" in val:
+        return [ActionRequest(
+            tool_name=val.get("tool_name", val.get("name", "unknown")),
+            action=val.get("args", val.get("action", {})) or {},
+            description=val.get("description", ""),
+        )]
+    return []
+
+
 def extract_interrupts(result: dict[str, Any]) -> list[ActionRequest]:
     """Extract pending action requests from an agent invocation result.
 
-    Looks for ``__interrupt__`` in the result and parses it into
-    a list of ActionRequest objects.
+    Handles multiple interrupt formats:
+    - HITLRequest dicts with action_requests[] (deepagents HumanInTheLoopMiddleware)
+    - LangGraph Interrupt objects with .value attribute
+    - Plain dicts with tool_name/args
 
     Returns an empty list if no interrupts are present.
     """
@@ -33,25 +62,24 @@ def extract_interrupts(result: dict[str, Any]) -> list[ActionRequest]:
         return []
 
     requests: list[ActionRequest] = []
-
     items = interrupt_data if isinstance(interrupt_data, list) else [interrupt_data]
 
     for item in items:
         if isinstance(item, dict):
-            requests.append(ActionRequest(
-                tool_name=item.get("tool_name", "unknown"),
-                action=item.get("args", item.get("action", {})) or {},
-                description=item.get("description", ""),
-            ))
+            requests.extend(_parse_hitl_request(item))
         else:
-            # Handle interrupt objects with .value attribute (LangGraph Interrupt)
+            # LangGraph Interrupt object with .value attribute
             val = getattr(item, "value", None)
             if isinstance(val, dict):
-                requests.append(ActionRequest(
-                    tool_name=val.get("tool_name", "unknown"),
-                    action=val.get("args", val.get("action", {})) or {},
-                    description=val.get("description", ""),
-                ))
+                parsed = _parse_hitl_request(val)
+                if parsed:
+                    requests.extend(parsed)
+                else:
+                    requests.append(ActionRequest(
+                        tool_name="unknown",
+                        action=val,
+                        description=str(val),
+                    ))
             else:
                 requests.append(ActionRequest(
                     tool_name="unknown",

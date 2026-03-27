@@ -129,24 +129,32 @@ class PostgresLogHandler(logging.Handler):
 def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
     """Configure structured logging for the application.
 
-    When LOG_FILE env var is set, structured JSON logs are also written to that file
-    (one JSON object per line, JSONL format).
+    Console output uses a clean human-readable format. JSON structured logs
+    are written only to the LOG_FILE (JSONL format) and PostgreSQL handler.
+    Noisy third-party loggers are silenced on the console.
     """
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    handler = logging.StreamHandler(sys.stdout)
-    if json_output:
-        handler.setFormatter(StructuredFormatter())
-    else:
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
-        ))
+    # Console handler — always human-readable, never JSON
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    # Only show WARNING+ from the app on console (conversation is shown via Rich)
+    console_handler.setLevel(logging.WARNING)
 
     root.handlers.clear()
-    root.addHandler(handler)
+    root.addHandler(console_handler)
 
-    # Optional file handler for persistent structured logs
+    # Silence noisy third-party loggers
+    for name in ("httpx", "urllib3", "langchain", "langchain_core",
+                 "langchain_ollama", "langchain_anthropic", "langchain_openai",
+                 "openai", "anthropic", "ollama"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+    # Optional file handler for persistent structured JSON logs
     log_file = os.getenv("LOG_FILE")
     if log_file:
         log_dir = os.path.dirname(log_file)
@@ -154,6 +162,7 @@ def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
             os.makedirs(log_dir, exist_ok=True)
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(StructuredFormatter())
+        file_handler.setLevel(logging.DEBUG)
         root.addHandler(file_handler)
 
     # Optional PostgreSQL handler for queryable telemetry (dual-write with file)

@@ -14,6 +14,12 @@ from src.subagent import (
     get_cline_executor_subagent,
     set_bridge,
 )
+from src.llm import (
+    _active_ollama_models,
+    _register_ollama_model,
+    _unload_other_ollama_models,
+    unload_ollama_model,
+)
 
 
 class TestClineExecutorSubagentDefinition:
@@ -38,8 +44,8 @@ class TestClineExecutorSubagentDefinition:
         # approve_cline_action should interrupt with approve/edit/reject
         assert ion["approve_cline_action"]["allowed_decisions"] == ["approve", "edit", "reject"]
 
-        # dispatch_subtask should interrupt with approve/reject
-        assert ion["dispatch_subtask"]["allowed_decisions"] == ["approve", "reject"]
+        # dispatch_subtask should NOT interrupt (auto-approved)
+        assert ion["dispatch_subtask"] is False
 
         # answer_question should NOT interrupt
         assert ion["answer_question"] is False
@@ -181,3 +187,118 @@ class TestApproveClineAction:
             "action_type": action_type,
         })
         assert "escalate" in result
+
+
+class TestSubagentToolSupport:
+    """Tests for subagent model tool-calling support validation."""
+
+    @patch.dict(os.environ, {"LLM_PROVIDER": "ollama", "OLLAMA_BASE_URL": "http://localhost:11434"})
+    def test_rejects_model_without_tool_support(self) -> None:
+        """A model that doesn't support tools should fail at subagent creation."""
+        from src.llm import OllamaUnavailableError
+
+        with patch("src.llm._check_ollama_connectivity") as mock_check:
+            # Simulate tool check failure
+            mock_check.side_effect = OllamaUnavailableError(
+                "Model 'no-tools-model' does not support tool calling"
+            )
+            with pytest.raises(OllamaUnavailableError, match="does not support tool"):
+                get_cline_executor_subagent()
+
+    @patch.dict(os.environ, {
+        "LLM_PROVIDER": "ollama",
+        "OLLAMA_BASE_URL": "http://localhost:11434",
+        "OLLAMA_SUBAGENT_MODEL": "tool-capable-model:latest",
+    })
+    def test_accepts_model_with_tool_support(self) -> None:
+        """A model that supports tools should create the subagent successfully."""
+        with patch("src.llm._check_ollama_connectivity"):
+            defn = get_cline_executor_subagent()
+            assert defn["name"] == "cline-executor"
+            assert defn["model"].model == "tool-capable-model:latest"
+
+    @patch.dict(os.environ, {
+        "LLM_PROVIDER": "ollama",
+        "OLLAMA_BASE_URL": "http://localhost:11434",
+        "OLLAMA_SUBAGENT_MODEL": "qwen3-coder-next:latest",
+    })
+    def test_subagent_uses_env_var_model(self) -> None:
+        """Subagent should use OLLAMA_SUBAGENT_MODEL env var."""
+        with patch("src.llm._check_ollama_connectivity"):
+            defn = get_cline_executor_subagent()
+            assert defn["model"].model == "qwen3-coder-next:latest"
+
+
+class TestOllamaVramSwap:
+    """Tests for VRAM model swapping when running multiple Ollama models."""
+
+    def setup_method(self) -> None:
+        """Clear the active models registry before each test."""
+        _active_ollama_models.clear()
+
+    def test_register_ollama_model(self) -> None:
+        """Registering a model adds it to the active set."""
+        _register_ollama_model("model-a")
+        assert "model-a" in _active_ollama_models
+
+    def test_register_multiple_models(self) -> None:
+        """Multiple models can be registered."""
+        _register_ollama_model("model-a")
+        _register_ollama_model("model-b")
+        assert _active_ollama_models == {"model-a", "model-b"}
+
+    def test_register_same_model_twice_is_idempotent(self) -> None:
+        """Registering the same model twice doesn't duplicate it."""
+        _register_ollama_model("model-a")
+        _register_ollama_model("model-a")
+        assert len(_active_ollama_models) == 1
+
+    @patch("src.llm.unload_ollama_model")
+    def test_unload_other_models_calls_unload(self, mock_unload: MagicMock) -> None:
+        """Swapping to a model should unload all other registered models."""
+        _register_ollama_model("gpt-oss:20b")
+        _register_ollama_model("qwen3-coder-next:latest")
+
+        _unload_other_ollama_models("qwen3-coder-next:latest")
+
+        mock_unload.assert_called_once_with("gpt-oss:20b", None)
+
+    @patch("src.llm.unload_ollama_model")
+    def test_unload_does_not_unload_current_model(self, mock_unload: MagicMock) -> None:
+        """The current model should NOT be unloaded."""
+        _register_ollama_model("gpt-oss:20b")
+
+        _unload_other_ollama_models("gpt-oss:20b")
+
+        mock_unload.assert_not_called()
+
+    @patch("src.llm.unload_ollama_model")
+    def test_unload_with_three_models(self, mock_unload: MagicMock) -> None:
+        """All models except the current one should be unloaded."""
+        _register_ollama_model("model-a")
+        _register_ollama_model("model-b")
+        _register_ollama_model("model-c")
+
+        _unload_other_ollama_models("model-b")
+
+        unloaded = {call.args[0] for call in mock_unload.call_args_list}
+        assert unloaded == {"model-a", "model-c"}
+
+    @patch("httpx.post")
+    def test_unload_ollama_model_sends_keep_alive_zero(self, mock_post: MagicMock) -> None:
+        """unload_ollama_model should POST to Ollama with keep_alive=0."""
+        mock_post.return_value = MagicMock(status_code=200)
+
+        unload_ollama_model("gpt-oss:20b", "http://localhost:11434")
+
+        mock_post.assert_called_once_with(
+            "http://localhost:11434/api/generate",
+            json={"model": "gpt-oss:20b", "keep_alive": 0},
+            timeout=10.0,
+        )
+
+    @patch("httpx.post", side_effect=Exception("connection refused"))
+    def test_unload_ollama_model_handles_connection_error(self, mock_post: MagicMock) -> None:
+        """unload_ollama_model should not raise on connection errors."""
+        # Should not raise
+        unload_ollama_model("gpt-oss:20b", "http://localhost:11434")

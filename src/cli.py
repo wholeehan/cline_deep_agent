@@ -7,8 +7,10 @@ import logging
 import os
 import uuid
 from contextlib import ExitStack
+from typing import Any
 
 from dotenv import load_dotenv
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from rich.console import Console
 
 from openai import APIConnectionError as OpenAIConnectionError
@@ -23,6 +25,50 @@ load_dotenv()
 
 console = Console()
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Conversation display
+# ---------------------------------------------------------------------------
+
+
+def _display_messages(messages: list[Any], seen_count: int) -> int:
+    """Display new messages since the last turn using Rich formatting.
+
+    Shows agent text, tool calls, and tool results in a clean conversation
+    format instead of raw JSON logs.
+
+    Returns the new seen_count.
+    """
+    for msg in messages[seen_count:]:
+        if isinstance(msg, HumanMessage):
+            # User messages are already shown via the input prompt
+            pass
+        elif isinstance(msg, AIMessage):
+            # Show agent text
+            if msg.content:
+                console.print(f"\n[bold cyan]Agent:[/] {msg.content}")
+            # Show tool calls
+            for tc in getattr(msg, "tool_calls", None) or []:
+                name = tc.get("name", "?")
+                args = tc.get("args", {})
+                args_str = json.dumps(args, ensure_ascii=False)
+                if len(args_str) > 200:
+                    args_str = args_str[:200] + "..."
+                console.print(
+                    f"  [dim]\u2192 calling [yellow]{name}[/yellow]({args_str})[/dim]"
+                )
+        elif isinstance(msg, ToolMessage):
+            # Show tool result (truncated for readability)
+            name = getattr(msg, "name", None) or "tool"
+            content = str(msg.content)
+            if len(content) > 300:
+                content = content[:300] + "..."
+            console.print(
+                f"  [dim]\u2190 [green]{name}[/green]: {content}[/dim]"
+            )
+
+    return len(messages)
 
 _BANNER = r"""
    _____ _ _
@@ -83,12 +129,15 @@ def _open_telemetry_handler(
     if os.getenv("DATABASE_URL"):
         try:
             from src.db import get_connection_pool
-            from src.telemetry import PostgresCallbackHandler
+            from src.telemetry import PostgresCallbackHandler, register_global_callback
 
             pool = get_connection_pool()
             if pool is not None:
                 pg_cb = PostgresCallbackHandler(pool, session_id=session_id)
                 callbacks.append(pg_cb)
+                # Register globally so ALL LLM instances (subagents, standalone
+                # tool calls) automatically get telemetry capture via get_llm()
+                register_global_callback(pg_cb)
                 logger.info("Telemetry also logging to PostgreSQL llm_traces table")
         except Exception:
             logger.warning(
@@ -117,24 +166,26 @@ def main() -> None:
     console.print(f"[dim]LLM Provider: {os.getenv('LLM_PROVIDER', 'anthropic')}[/]")
     console.print("[dim]" + "=" * 50 + "[/]")
 
-    try:
-        subagent = get_cline_executor_subagent()
-        agent = create_agent_manager(
-            subagents=[subagent],
-            skills=["/skills/"],
-        )
-    except OllamaUnavailableError as exc:
-        logger.error("Ollama startup check failed: %s", exc)
-        console.print(f"[bold red]{exc}[/]\n")
-        return
-
     with ExitStack() as stack:
         thread_id = str(uuid.uuid4())
         callbacks = _open_telemetry_handler(stack, session_id=thread_id)
+
+        try:
+            subagent = get_cline_executor_subagent(callbacks=callbacks)
+            agent = create_agent_manager(
+                subagents=[subagent],
+                skills=["/skills/"],
+            )
+        except OllamaUnavailableError as exc:
+            logger.error("Ollama startup check failed: %s", exc)
+            console.print(f"[bold red]{exc}[/]\n")
+            return
         config = {"configurable": {"thread_id": thread_id}, "callbacks": callbacks}
 
         console.print(f"\n[green]Session: {thread_id}[/]")
         console.print("Type your task (or 'quit' to exit):\n")
+
+        seen_count = 0  # Track how many messages we've already displayed
 
         while True:
             try:
@@ -156,6 +207,10 @@ def main() -> None:
                     config=config,
                 )
 
+                # Display new messages (tool calls, results, agent text)
+                messages = result.get("messages", [])
+                seen_count = _display_messages(messages, seen_count)
+
                 # Check for interrupts
                 interrupts = extract_interrupts(result)
                 while interrupts:
@@ -173,14 +228,13 @@ def main() -> None:
                         cmd = build_reject_command()
 
                     result = agent.invoke(cmd, config=config)
+
+                    # Display messages from the resumed invocation
+                    messages = result.get("messages", [])
+                    seen_count = _display_messages(messages, seen_count)
                     interrupts = extract_interrupts(result)
 
-                # Print final response
-                messages = result.get("messages", [])
-                if messages:
-                    last = messages[-1]
-                    content = getattr(last, "content", str(last))
-                    console.print(f"\n{content}\n")
+                console.print()  # Blank line before next prompt
 
             except OpenAIConnectionError:
                 if os.getenv("LLM_PROVIDER") != "vllm":

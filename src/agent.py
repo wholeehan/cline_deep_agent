@@ -121,10 +121,12 @@ def get_checkpointer(db_path: str | None = None) -> Any:
         import psycopg
 
         logger.info("Using PostgresSaver checkpointer with DATABASE_URL")
+        # Setup requires autocommit for CREATE INDEX CONCURRENTLY
+        setup_conn = psycopg.connect(db_url, autocommit=True)
+        PostgresSaver(setup_conn).setup()
+        setup_conn.close()
         conn = psycopg.connect(db_url)
-        checkpointer = PostgresSaver(conn)
-        checkpointer.setup()
-        return checkpointer
+        return PostgresSaver(conn)
     if db_url and not _POSTGRES_AVAILABLE:
         logger.warning(
             "DATABASE_URL set but langgraph-checkpoint-postgres not installed; "
@@ -172,16 +174,27 @@ def create_agent_manager(
         model=llm,
         tools=[report_progress, save_output],
         system_prompt=(
-            "You are the Cline Agent Manager. You orchestrate software engineering tasks "
-            "by decomposing them into subtasks, dispatching them to the cline-executor "
-            "subagent, verifying results, and reporting progress to the user.\n\n"
-            "Use write_todos to plan, task() to delegate, and report_progress to update the user.\n\n"
-            "IMPORTANT — File paths:\n"
-            "- Use /workspace/ for temporary scratch work (ephemeral, lost on restart).\n"
-            "- Use /output/ for ALL generated code, plans, and deliverables that should "
-            "be saved permanently. Files written to /output/ are persisted to disk at "
-            "data/output/. You can also use the save_output tool for convenience.\n"
-            "- Always write final results to /output/ so the user can find them."
+            "You are the Cline Agent Manager. You help users with software engineering tasks.\n\n"
+            "## Simple tasks — do them yourself:\n"
+            "For writing code, scripts, functions, configs, or fixing known bugs:\n"
+            "- Write the code yourself and save it with save_output.\n"
+            "- Use read_file / write_file / edit_file for file operations.\n"
+            "- Do NOT delegate simple tasks to the cline-executor.\n\n"
+            "## Complex tasks — delegate ONCE:\n"
+            "Only use task(subagent_type='cline-executor') for tasks that genuinely\n"
+            "require the Cline CLI (interactive multi-file refactors, autonomous coding\n"
+            "sessions, tasks requiring shell interaction).\n"
+            "- Call task() exactly ONCE per subtask.\n"
+            "- When the subagent returns a result, ACCEPT it. Do NOT re-call task()\n"
+            "  with the same or similar description.\n"
+            "- If the result is unsatisfactory, tell the user — don't retry silently.\n\n"
+            "## File paths:\n"
+            "- /workspace/ — temporary scratch (ephemeral, lost on restart)\n"
+            "- /output/ — permanent storage (persisted to data/output/)\n"
+            "- Always save final deliverables to /output/ using save_output.\n\n"
+            "## Completion:\n"
+            "Once the task is done, present the result to the user and STOP.\n"
+            "Do not re-run, re-verify, or re-delegate completed work."
         ),
         subagents=subagents or [],  # type: ignore[arg-type]
         skills=skills or [],

@@ -56,8 +56,71 @@ def _extract_reasoning_text(raw: str) -> str:
     return raw.strip()
 
 
-class RobustChatOllama(ChatOllama):
+# ---------------------------------------------------------------------------
+# Ollama model memory management
+# ---------------------------------------------------------------------------
+
+
+def unload_ollama_model(model: str, base_url: str | None = None) -> None:
+    """Unload a model from Ollama's VRAM by setting keep_alive=0.
+
+    This frees GPU memory so another model can be loaded.
+    """
+    url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    try:
+        resp = httpx.post(
+            f"{url}/api/generate",
+            json={"model": model, "keep_alive": 0},
+            timeout=10.0,
+        )
+        if resp.status_code == 200:
+            logger.info("Unloaded model '%s' from Ollama VRAM", model)
+        else:
+            logger.warning("Failed to unload model '%s': HTTP %d", model, resp.status_code)
+    except Exception:
+        logger.debug("Could not unload model '%s' (Ollama may not be running)", model)
+
+
+# Track which Ollama models are managed so we can unload them on swap
+_active_ollama_models: set[str] = set()
+
+
+def _register_ollama_model(model: str) -> None:
+    """Register an Ollama model as active (may need unloading before swap)."""
+    _active_ollama_models.add(model)
+
+
+def _unload_other_ollama_models(current_model: str, base_url: str | None = None) -> None:
+    """Unload all registered Ollama models except the current one."""
+    for m in _active_ollama_models:
+        if m != current_model:
+            unload_ollama_model(m, base_url)
+
+
+class SwapAwareChatOllama(ChatOllama):
+    """ChatOllama that unloads other Ollama models before generating.
+
+    When running multiple Ollama models on limited VRAM, this ensures only
+    one model is loaded at a time by unloading competing models before
+    each inference call.
+    """
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        _unload_other_ollama_models(self.model, self.base_url)
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
+class RobustChatOllama(SwapAwareChatOllama):
     """ChatOllama wrapper that handles models mixing reasoning with tool calls.
+
+    Inherits from SwapAwareChatOllama to automatically unload competing models
+    before each call, preventing VRAM exhaustion when running multiple models.
 
     Some Ollama models (e.g. gpt-oss) embed chain-of-thought reasoning before
     the tool call JSON arguments, causing Ollama's server-side parser to fail
@@ -216,6 +279,11 @@ def get_llm(
     Reads ``LLM_PROVIDER`` env var (default ``"anthropic"``).
     When ``ollama``, pings the server and verifies the model exists.
 
+    Global telemetry callbacks (registered via ``register_global_callback``)
+    are automatically merged into the ``callbacks`` kwarg so every LLM
+    instance captures telemetry — including subagent LLMs and standalone
+    tool calls like ``answer_question``.
+
     Parameters
     ----------
     temperature:
@@ -227,11 +295,34 @@ def get_llm(
         models that handle tool calling through prompt-based methods
         (e.g. qwen3-coder).
     """
+    # Merge global telemetry callbacks into kwargs
+    try:
+        from src.telemetry import get_global_callbacks
+
+        global_cbs = get_global_callbacks()
+        if global_cbs:
+            existing = list(kwargs.get("callbacks", []) or [])
+            # Avoid duplicates
+            existing_ids = {id(cb) for cb in existing}
+            for cb in global_cbs:
+                if id(cb) not in existing_ids:
+                    existing.append(cb)
+            kwargs["callbacks"] = existing
+            logger.info(
+                "get_llm: injected %d global telemetry callback(s) for model_override=%s",
+                len(global_cbs), model_override,
+            )
+        else:
+            logger.info("get_llm: no global callbacks registered (model_override=%s)", model_override)
+    except ImportError:
+        logger.warning("get_llm: src.telemetry not available, skipping global callbacks")
+
     provider = os.getenv("LLM_PROVIDER", "anthropic")
 
     if provider == "vllm":
         model = model_override or os.getenv("VLLM_MODEL", "Qwen/Qwen3-Coder-Next")
         base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        logger.info("get_llm: creating ChatOpenAI (vllm) model=%s callbacks=%d", model, len(kwargs.get("callbacks", [])))
         return ChatOpenAI(
             model=model,
             base_url=base_url,
@@ -244,6 +335,8 @@ def get_llm(
         model = model_override or os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         _check_ollama_connectivity(base_url, model, skip_tool_check=skip_tool_check)
+        _register_ollama_model(model)
+        logger.info("get_llm: creating RobustChatOllama model=%s callbacks=%d", model, len(kwargs.get("callbacks", [])))
         return RobustChatOllama(
             model=model,
             base_url=base_url,

@@ -53,8 +53,10 @@ The manager decomposes user tasks into subtasks, dispatches them to a **cline-ex
 - **Human-in-the-loop** — auto-approves safe actions (file reads/writes, local commands) and escalates risky ones (HTTP, deletes, git push) via LangGraph interrupts
 - **QA verification** — evaluates subtask output against acceptance criteria before marking done
 - **State machine** — enforces valid subtask transitions: `pending → dispatched → verified | failed` (with retry from `failed`)
-- **Structured logging** — JSON logs with `llm_provider`, event type, tool name, and decision metadata
-- **Telemetry database** — Optional PostgreSQL backend for queryable agent events, LLM traces, and benchmark results with dual-write to flat files (see [Telemetry Database](#telemetry-database))
+- **Smart delegation** — handles simple tasks directly (save_output); only delegates to Cline for complex multi-file work, with automatic VRAM model swapping
+- **Clean conversation display** — Rich-formatted output showing agent thoughts, tool calls, and results instead of raw JSON logs
+- **Structured logging** — JSON logs to file with human-readable console output; noisy third-party loggers silenced
+- **Telemetry database** — Optional PostgreSQL backend with auto-provisioned Grafana dashboard for queryable agent events, LLM traces, and benchmark results (see [Telemetry Database](#telemetry-database))
 - **Session replay** — timestamped append-only log of all PTY stdin/stdout for debugging
 - **Context window guard** — automatic message trimming when Ollama context exceeds 32k tokens
 
@@ -93,9 +95,13 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -e '.[dev]'
 
-# Start Ollama and pull the model
+# Start Ollama and pull the models
 ollama serve &
+ollama pull gpt-oss:20b
 ollama pull qwen3-coder:latest
+
+# Build the tool-calling subagent model
+bash ollama/setup.sh
 
 # Configure
 cp .env.example .env
@@ -159,6 +165,9 @@ cline_deep_agent/
 ├── grafana/
 │   ├── provisioning/           # Auto-configures data source + dashboard loader
 │   └── dashboards/             # Pre-built 8-panel telemetry dashboard JSON
+├── ollama/
+│   ├── Modelfile.qwen3-coder-tools  # Custom Modelfile enabling tool calling
+│   └── setup.sh                # Build script for the custom model
 ├── scripts/
 │   └── migrate_to_postgres.py  # One-time migration of flat files → PostgreSQL
 ├── telemetry.md             # Detailed telemetry database documentation
